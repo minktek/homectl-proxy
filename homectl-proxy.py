@@ -1,3 +1,5 @@
+#!/usr/bin/python3
+#
 # Home control proxy for various devices in the house
 #  
 # by Steve Mink
@@ -16,8 +18,13 @@
 # limitations under the License.
 # 
 #
+import argparse
+import csv
 from flask import Flask, jsonify, request, make_response
+import os
 import socket
+import time
+
 
 XOR_AUTOKEY_CIPHER_START_KEY = 171
 TPLINK_DEFAULT_PORTNUM = 9999
@@ -42,26 +49,10 @@ commands = {
     'internal' : 'test'
 }
 
-# XXX default me to "empty" so I can have a script take care of starting this
-#     and handling network (arp) scans
-devices = [
-    {
-        # XXX worth adding 'owner' so that one person can't mess with another?
-        # how do we track owner? avoid copy/paste attack if possible
-        # how about the time stuff?
-        'ipaddr': u'192.168.1.31',
-        'macaddr': u'50:c7:bf:05:a5:40',
-        'port': TPLINK_DEFAULT_PORTNUM,
-        'name': u'tv-lr'
-    },
-    {
-        'ipaddr': u'192.168.1.100',
-        'macaddr': u'2c:60:0c:6b:58:a1',
-        'port': TPLINK_DEFAULT_PORTNUM,
-        'name': u'fake1'
-    },
-]
-
+# XXX worth adding 'owner' so that one person can't mess with another?
+# how do we track owner? avoid copy/paste attack if possible
+# how about the time stuff?
+devices = [] 
 
 # Encryption and Decryption of TP-Link Smart Home Protocol
 # XOR Autokey Cipher with starting key = 171
@@ -86,6 +77,8 @@ def decrypt(bytes):
 
 
 def run_command(name, ipaddr, cmd, port):
+    # XXX log me
+    #print("Run: ", cmd, " on: ", name, " at:", ipaddr, ":", port)
     try:
         sock_tcp = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         sock_tcp.connect((ipaddr, port))
@@ -133,6 +126,47 @@ def sanitize_command(cmd):
     return None
 
 
+def device_create_backup(prev_name):
+    success = True
+    try:
+        # XXX it is currently "name" "extension" "date/time"
+        # should it be "name" "date/time" "extension" ?
+        new_name = prev_name + time.strftime("-%Y-%m-%d-%H-%M-%S", time.gmtime())
+        os.rename(prev_name, new_name)
+        # XXX log me
+    except:
+        success = False
+    #print("success:", success)
+    return success
+
+
+def device_load(fname):
+    f = None
+    try:
+        f = csv.DictReader(open(fname))
+    except:
+        f = None
+    if f is None:
+        print("error loading: ", fname)
+        return False
+    for row in f:
+        devices.append(row)
+    # XXX log me
+    #print("done loading: ", fname)
+    return True
+
+
+def device_flush(fname):
+    device_create_backup(fname)
+    with open(fname, 'w') as f:
+        w = csv.DictWriter(f, devices[0].keys())
+        w.writeheader()
+        for dev in devices:
+            w.writerow(dev)
+    # XXX log me
+    #print("done flushing")
+
+
 @app.route('/iot', methods=['GET'])
 def device_list():
     return jsonify({'devices': devices})
@@ -141,6 +175,7 @@ def device_list():
 @app.route('/iot', methods=['POST'])
 def device_add():
     # get the name first since names must be unique
+    # XXX first check for genname=true (or similar)
     name = sanitize_name(request.values.get("name"))
     if name is None:
         return make_response(jsonify({'error': 'Name Parameter error'}),
@@ -164,6 +199,8 @@ def device_add():
     if port is None:
         port = TPLINK_DEFAULT_PORTNUM
 
+    # XXX log me
+    #print("Add:", "name=", name, " ipaddr=", ip, " macaddr=", mac)
     # looks good - add it
     print("Add:", "name=", name, " ipaddr=", ip, " macaddr=", mac)
     newdev = {}
@@ -186,7 +223,8 @@ def device_delete():
     if len(dev) == 0:
         return make_response(jsonify({'error': 'Not found'}),
                              HTTP_STATUS_NOT_FOUND)
-    print("Del:", "name=", name, "dev:", dev)
+    # XXX log me
+    #print("Del:", "name=", name, "dev:", dev)
     devices.remove(dev[0])
     return make_response(jsonify({'status': 'Deleted'}), HTTP_STATUS_OK)
 
@@ -210,7 +248,18 @@ def not_found(error):
                          HTTP_STATUS_NOT_FOUND)
 
 
-# XXX pass in an optional address to bind to
 if __name__ == '__main__':
-    app.run(debug=True, host='0.0.0.0')
+    parser = argparse.ArgumentParser()
+    parser.add_argument("-b", "--bind", default='0.0.0.0', action="store", 
+                        dest="bindaddr", help="only listen on specified address")
+    parser.add_argument("-f", "--filename", default='devices.csv', action='store',
+                        dest="device_file", help="file containing known devices")
+    parser.add_argument("-p", "--port", type=int, default=5100, action='store',
+                        dest='portnum', help="port number server listens on")
+    args = parser.parse_args()
+    if device_load(args.device_file) is False:
+        print("Error loading devices file:", args.device_file)
+    else:
+        app.run(debug=True, host=args.bindaddr, port=int(args.portnum))
+        device_flush(args.device_file)
 
